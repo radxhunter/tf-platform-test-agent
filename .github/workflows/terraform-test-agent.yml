@@ -1,0 +1,444 @@
+name: Terraform test agent
+
+# Security model, in one place:
+#  - Only `agent` sees the Anthropic key; it has a read-only token, runs with
+#    the agent configuration from the base branch, and every terraform command
+#    it triggers runs in a container with no network and no environment.
+#  - Only `publish` can write to the repository; it never executes code from
+#    the pull request (it applies a guarded patch and runs trusted scripts).
+#  - `checks` and `verify` execute pull request code (terraform, providers),
+#    so they hold no secrets and only a read-only token.
+#  - Fork pull requests get the deterministic checks only: no key, no writes.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: ["modules/**", "stacks/**"]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to run on
+        required: true
+      include:
+        description: Extra units to put in scope, space-separated, or "all" for a backfill
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: tf-test-agent-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+env:
+  CLAUDE_CODE_VERSION: "2.1.290"
+  TF_IMAGE: hashicorp/terraform:1.16.6@sha256:bfffc1ded5fbf0a17beaaf22eb4793980abdb19d0761ff6a3a0efb2ab4d9b316
+
+jobs:
+  context:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+      contents: read
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      head_ref: ${{ steps.pr.outputs.head_ref }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      same_repo: ${{ steps.pr.outputs.same_repo }}
+      run_agent: ${{ steps.decide.outputs.run_agent }}
+      skip_reason: ${{ steps.decide.outputs.skip_reason }}
+    steps:
+      - name: Read pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "::error::invalid pull request number"; exit 1; }
+          gh api "repos/$REPO/pulls/$PR" > pr.json
+          jq -r '
+            "number=\(.number)",
+            "head_sha=\(.head.sha)",
+            "head_ref=\(.head.ref)",
+            "base_sha=\(.base.sha)",
+            "same_repo=\(.head.repo.full_name == .base.repo.full_name)",
+            "draft=\(.draft)",
+            "state=\(.state)",
+            "skip_label=\([.labels[].name] | index("test-agent:skip") != null)"
+          ' pr.json >> "$GITHUB_OUTPUT"
+          gh api "repos/$REPO/commits/$(jq -r .head.sha pr.json)" --jq .commit.message > head-message.txt
+
+      - name: Decide whether the agent runs
+        id: decide
+        env:
+          STATE: ${{ steps.pr.outputs.state }}
+          DRAFT: ${{ steps.pr.outputs.draft }}
+          SAME_REPO: ${{ steps.pr.outputs.same_repo }}
+          SKIP_LABEL: ${{ steps.pr.outputs.skip_label }}
+        run: |
+          reason=""
+          if [ "$STATE" != "open" ]; then reason="the pull request is not open"
+          elif [ "$DRAFT" = "true" ]; then reason="the pull request is a draft"
+          elif [ "$SAME_REPO" != "true" ]; then reason="pull requests from forks get the deterministic checks only (no secrets, no write access)"
+          elif [ "$SKIP_LABEL" = "true" ]; then reason="the test-agent:skip label is set"
+          elif grep -q '^Test-Agent-Run:' head-message.txt; then reason="the latest commit was made by the test agent"
+          fi
+          if [ -n "$reason" ]; then
+            echo "run_agent=false" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=$reason" >> "$GITHUB_OUTPUT"
+            echo "Agent skipped: $reason" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run_agent=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  checks:
+    needs: context
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out base branch (trusted scripts)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.base_sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.head_sha }}
+          path: work
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Work out the scope
+        id: scope
+        working-directory: work
+        env:
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          INCLUDE: ${{ inputs.include }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../out
+          python3 ../trusted/.claude/skills/tf-change-analysis/scripts/changed_scope.py "$BASE_SHA" "$HEAD_SHA" --include "$INCLUDE" > ../out/scope.json
+          merge_base=$(jq -r .base ../out/scope.json)
+          git diff --no-color --no-ext-diff "$merge_base" "$HEAD_SHA" -- modules stacks > ../out/diff.patch
+          echo "units=$(jq -r '[.units[].path] | join(" ")' ../out/scope.json)" >> "$GITHUB_OUTPUT"
+          cat ../out/scope.json
+
+      - name: Initialise units (network, no secrets)
+        if: steps.scope.outputs.units != ''
+        working-directory: work
+        env:
+          UNITS: ${{ steps.scope.outputs.units }}
+        run: python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py $UNITS
+
+      - name: Run existing tests (sandbox)
+        id: baseline
+        if: steps.scope.outputs.units != ''
+        working-directory: work
+        env:
+          UNITS: ${{ steps.scope.outputs.units }}
+        run: |
+          set +e
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/run_tests.py $UNITS --out ../out/baseline.json > /dev/null
+          echo "ok=$([ $? -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          python3 ../trusted/.claude/skills/tf-coverage/scripts/coverage.py $UNITS > ../out/coverage-before.json
+
+      - name: Check formatting of the whole repository (sandbox)
+        id: fmt
+        working-directory: work
+        run: |
+          set +e
+          docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" \
+            -v "$PWD:/ws:ro" -w /ws "$TF_IMAGE" fmt -check -recursive -no-color
+          echo "ok=$([ $? -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload context
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: context
+          path: out/
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deterministic checks"
+            echo "- Units in scope: \`${{ steps.scope.outputs.units || 'none' }}\`"
+            echo "- Existing tests: ${{ steps.baseline.outputs.ok || 'not run' }}"
+            echo "- Formatting: ${{ steps.fmt.outputs.ok }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if the pull request as pushed is broken
+        if: steps.baseline.outputs.ok == 'false' || steps.fmt.outputs.ok == 'false'
+        run: |
+          echo "::error::Existing tests or formatting fail on the pull request head. See the summary."
+          exit 1
+
+  agent:
+    needs: [context, checks]
+    if: ${{ !cancelled() && needs.context.outputs.run_agent == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      status: ${{ steps.run.outputs.status }}
+    steps:
+      - name: Check out base branch (trusted agent configuration)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.base_sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.head_sha }}
+          path: work
+          persist-credentials: false
+
+      - name: Download context
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: context
+          path: ctx
+
+      - name: Replace agent configuration with the trusted copy
+        run: |
+          bash trusted/.github/test-agent/sanitize_workspace.sh trusted work
+          mkdir -p work/.test-agent/context agent-out
+          cp ctx/scope.json ctx/diff.patch work/.test-agent/context/
+          cp ctx/baseline.json work/.test-agent/context/ 2>/dev/null || echo '{"ok": true, "units": []}' > work/.test-agent/context/baseline.json
+          echo "units=$(jq -r '[.units[].path] | join(" ")' ctx/scope.json)" >> "$GITHUB_ENV"
+
+      - name: Initialise units (network, before any secret is present)
+        if: env.units != ''
+        working-directory: work
+        run: |
+          docker pull --quiet "$TF_IMAGE"
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py $units
+
+      - name: Install Claude Code
+        run: npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+      - name: Run the agent
+        id: run
+        if: env.units != ''
+        working-directory: work
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          PR_NUMBER: ${{ needs.context.outputs.number }}
+          TEST_AGENT_MODEL: ${{ vars.TEST_AGENT_MODEL || 'claude-sonnet-5-5' }}
+          TEST_AGENT_MAX_USD: ${{ vars.TEST_AGENT_MAX_USD || '5' }}
+          TF_TEST_SANDBOX: docker
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "status=no API key is configured (secret ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if bash ../trusted/.github/test-agent/run_agent.sh ../agent-out; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=the agent run failed; see the job log" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect the agent's test changes
+        working-directory: work
+        run: |
+          set -euo pipefail
+          git add -A -- ':(glob)modules/*/tests/*.tftest.hcl' ':(glob)stacks/*/tests/*.tftest.hcl'
+          git diff --cached --no-color --no-ext-diff > ../agent-out/tests.patch
+          # Anything else the agent changed is not used, but it is reported.
+          git status --porcelain=v1 -uall -- . ':!.claude' ':!.test-agent' | grep -v '^A ' > ../agent-out/other-changes.txt || true
+          git diff --cached --stat
+
+      - name: Make sure no credential left the agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          for value in "$ANTHROPIC_API_KEY" "$CLAUDE_CODE_OAUTH_TOKEN"; do
+            if [ -n "$value" ] && grep -rqF -- "$value" agent-out; then
+              echo "::error::A credential was found in the agent output. Discarding it."
+              rm -rf agent-out
+              exit 1
+            fi
+          done
+          if grep -rqE 'sk-ant-[A-Za-z0-9_-]{20,}' agent-out; then
+            echo "::error::Something that looks like an Anthropic key is in the agent output. Discarding it."
+            rm -rf agent-out
+            exit 1
+          fi
+
+      - name: Upload agent output
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-out
+          path: agent-out/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  verify:
+    needs: [context, agent]
+    if: ${{ !cancelled() && needs.agent.result == 'success' && needs.agent.outputs.status == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out base branch (trusted scripts)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.base_sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.head_sha }}
+          path: work
+          persist-credentials: false
+
+      - name: Download context and agent output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{context,agent-out}"
+          path: in
+          merge-multiple: true
+
+      - name: Guard the patch
+        id: guard
+        run: |
+          mkdir -p out
+          set +e
+          python3 trusted/.github/test-agent/guard_changes.py work in/tests.patch in/scope.json --out out/guard.json
+          echo "ok=$([ $? -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Apply the patch and re-run every test in scope (sandbox)
+        if: steps.guard.outputs.ok == 'true'
+        working-directory: work
+        run: |
+          set -euo pipefail
+          if [ -s ../in/tests.patch ]; then git apply ../in/tests.patch; fi
+          units=$(jq -r '[.units[].path] | join(" ")' ../in/scope.json)
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py $units
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/run_tests.py $units --out ../out/verify.json > /dev/null || true
+          python3 ../trusted/.claude/skills/tf-coverage/scripts/coverage.py $units > ../out/coverage-after.json
+          jq '{ok, units: [.units[] | {unit, ok}]}' ../out/verify.json
+
+      - name: Upload verification
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verify
+          path: out/
+          retention-days: 14
+
+  publish:
+    needs: [context, checks, agent, verify]
+    if: ${{ !cancelled() && needs.context.outputs.same_repo == 'true' && needs.context.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Check out base branch (trusted scripts)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.base_sha }}
+          path: trusted
+          persist-credentials: false
+
+      # This checkout keeps the token so the job can push. Nothing from the
+      # pull request is executed in this job: only `git apply` of a guarded
+      # patch and scripts from the trusted checkout.
+      - name: Check out pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.context.outputs.head_sha }}
+          path: work
+
+      - name: Download results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{context,agent-out,verify}"
+          path: out
+          merge-multiple: true
+
+      - name: Commit verified tests to the pull request branch
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ needs.context.outputs.head_ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f out/guard.json ] || [ ! -f out/verify.json ]; then echo "push=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$(jq -r .ok out/guard.json)" != "true" ] || [ "$(jq -r .empty out/guard.json)" = "true" ]; then echo "push=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$(jq -r .ok out/verify.json)" != "true" ]; then
+            echo "push=not committed because the independent test run failed" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          cd work
+          git apply --index ../out/tests.patch
+          # Only the guarded test files are staged; nothing else is committed.
+          git -c user.name="tf-test-agent[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "test: add or update terraform tests" -m "Written by the Terraform test agent and verified by re-running them." -m "Test-Agent-Run: $RUN_URL"
+          sha=$(git rev-parse HEAD)
+          if git push --quiet origin "HEAD:refs/heads/$HEAD_REF"; then
+            echo "push=pushed:${sha:0:7}" >> "$GITHUB_OUTPUT"
+            # Pushes made with GITHUB_TOKEN start no workflow, so record the
+            # verification on the new commit directly.
+            gh api "repos/$REPO/statuses/$sha" -f state=success -f context="tf-test-agent/verify" \
+              -f description="Agent tests re-run and passed on this commit" -f target_url="$RUN_URL" > /dev/null
+          else
+            echo "push=the branch moved while the agent was working; re-run the workflow" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post or update the pull request comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.context.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SKIP_REASON: ${{ needs.context.outputs.skip_reason }}
+          AGENT_STATUS: ${{ needs.agent.outputs.status }}
+          PUSH: ${{ steps.push.outputs.push }}
+          MODEL: ${{ vars.TEST_AGENT_MODEL || 'claude-sonnet-5-5' }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          status="${AGENT_STATUS:-${SKIP_REASON:-the agent job did not finish}}"
+          if [ -n "$SKIP_REASON" ]; then status="skipped: $SKIP_REASON"; fi
+          python3 trusted/.github/test-agent/render_comment.py --dir out \
+            --meta "agent_status=$status" --meta "push=$PUSH" --meta "model=$MODEL" \
+            --meta "config_sha=${BASE_SHA:0:7}" --meta "run_url=$RUN_URL" > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- tf-test-agent -->"))) | .id' | head -n 1)
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi
+
+      - name: Fail the check when the agent's work did not verify
+        if: needs.verify.result == 'success'
+        run: |
+          if [ "$(jq -r .ok out/guard.json)" != "true" ]; then echo "::error::The agent's patch was rejected by the guard."; exit 1; fi
+          if [ -f out/verify.json ] && [ "$(jq -r .ok out/verify.json)" != "true" ]; then echo "::error::Tests failed on re-run."; exit 1; fi
