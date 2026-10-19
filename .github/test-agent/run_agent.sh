@@ -12,12 +12,20 @@ set -euo pipefail
 
 out_dir="$1"
 mkdir -p "$out_dir"
-schema="$(cat "$(dirname "$0")/output.schema.json")"
+here="$(cd "$(dirname "$0")" && pwd)"
+schema="$(cat "$here/output.schema.json")"
 scope_units="$(python3 -c 'import json; print(" ".join(u["path"] for u in json.load(open(".test-agent/context/scope.json"))["units"]))')"
 
+# The schema is also in the prompt: --json-schema alone did not produce
+# structured output together with --agent, and the result is validated
+# below either way.
 prompt="Pull request #${PR_NUMBER}. Units in scope: ${scope_units:-none}.
 The context files are in .test-agent/context/ (scope.json, diff.patch, baseline.json).
-Follow your instructions: plan per unit, review, write or update tests, run them, and return the JSON result."
+Follow your instructions: plan per unit, review, write or update tests, run them.
+Your final message must be a single JSON object, with no text or code fence
+around it, that is valid against this JSON Schema (every required field,
+including units[].skills_used):
+${schema}"
 
 runner='python3 .claude/skills/tf-test-runner/scripts/run_tests.py'
 coverage='python3 .claude/skills/tf-coverage/scripts/coverage.py'
@@ -52,9 +60,9 @@ status=$?
 set -e
 
 # The last event of the stream is the result; keep only the structured part.
-python3 - "$out_dir" <<'EOF'
-import json, sys
-out = sys.argv[1]
+python3 - "$out_dir" "$here" <<'EOF'
+import json, subprocess, sys
+out, here = sys.argv[1], sys.argv[2]
 result = None
 for line in open(f"{out}/transcript.jsonl", encoding="utf-8"):
     try:
@@ -71,14 +79,30 @@ meta = {
 }
 structured = (result or {}).get("structured_output")
 if structured is None and result and isinstance(result.get("result"), str):
+    # Accept the object from the final message text, with or without a
+    # code fence around it. Anything else in the text is ignored.
+    text = result["result"]
+    start, end = text.find("{"), text.rfind("}")
     try:
-        structured = json.loads(result["result"])
+        structured = json.loads(text[start : end + 1]) if start != -1 else None
     except ValueError:
         structured = None
-json.dump({"meta": meta, "output": structured}, open(f"{out}/agent-result.json", "w"), indent=2)
-print(json.dumps(meta))
 if structured is None:
-    sys.exit("agent returned no structured output")
+    json.dump({"meta": meta, "output": None}, open(f"{out}/agent-result.json", "w"), indent=2)
+    print(json.dumps(meta))
+    sys.exit("agent returned no JSON result")
+
+json.dump(structured, open(f"{out}/raw-output.json", "w"), indent=2)
+check = subprocess.run(
+    [sys.executable, f"{here}/validate_output.py", f"{here}/output.schema.json", f"{out}/raw-output.json"],
+    capture_output=True, text=True,
+)
+meta["schema_errors"] = check.stdout.splitlines()
+valid = check.returncode == 0
+json.dump({"meta": meta, "output": structured if valid else None}, open(f"{out}/agent-result.json", "w"), indent=2)
+print(json.dumps(meta))
+if not valid:
+    sys.exit("agent result does not match the output schema:\n" + check.stdout)
 EOF
 
 exit $status
