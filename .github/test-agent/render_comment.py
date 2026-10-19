@@ -121,6 +121,8 @@ def main(argv):
     push = meta.get("push", "")
     if agent_status and agent_status != "success":
         lines.append(f"**Agent did not run to completion:** {text(agent_status, 300)}")
+    elif guard is None or verify is None and guard.get("ok"):
+        lines.append("❌ **The verification step produced no results, so nothing was committed.** See the run log.")
     elif guard and not guard["ok"]:
         lines.append("❌ **The agent's changes were rejected by the guard and not applied.**")
     elif verify is not None and not verify.get("ok"):

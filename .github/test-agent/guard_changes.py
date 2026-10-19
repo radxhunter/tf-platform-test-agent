@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".claude", "skills", "tf-coverage", "scripts"))
 from hcl_lite import blocks, strip_comments  # noqa: E402
@@ -89,18 +90,25 @@ def main(argv):
             if before.returncode != 0:
                 continue
             old = runs_and_asserts(before.stdout)
-            # Reconstruct the new file by applying the patch to a temporary index.
-            env_index = os.path.join(repo, ".git", "guard-index")
-            subprocess.run(["git", "-C", repo, "read-tree", "HEAD"], env={**os.environ, "GIT_INDEX_FILE": env_index}, check=True)
-            subprocess.run(
-                ["git", "-C", repo, "apply", "--cached", "--include", path, os.path.abspath(patch_path)],
-                env={**os.environ, "GIT_INDEX_FILE": env_index}, check=True, capture_output=True,
-            )
-            after = subprocess.run(
-                ["git", "-C", repo, "show", f":{path}"],
-                env={**os.environ, "GIT_INDEX_FILE": env_index}, check=True, capture_output=True, text=True,
-            ).stdout
-            os.remove(env_index)
+            # Reconstruct the new file by applying the patch to a temporary
+            # index. GIT_INDEX_FILE must be absolute: git resolves a relative
+            # one against the -C directory.
+            with tempfile.TemporaryDirectory() as tmp:
+                env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index")}
+                try:
+                    subprocess.run(["git", "-C", repo, "read-tree", "HEAD"], env=env, check=True, capture_output=True)
+                    subprocess.run(
+                        ["git", "-C", repo, "apply", "--cached", "--include", path, os.path.abspath(patch_path)],
+                        env=env, check=True, capture_output=True,
+                    )
+                    after = subprocess.run(
+                        ["git", "-C", repo, "show", f":{path}"], env=env, check=True, capture_output=True, text=True,
+                    ).stdout
+                except subprocess.CalledProcessError as e:
+                    # If removed assertions cannot be checked, do not let the
+                    # patch through unchecked.
+                    violations.append(f"G5 cannot compare assertions in {path}: {(e.stderr or b'').decode(errors='replace')[:200]}")
+                    continue
             new = runs_and_asserts(after)
             for run, count in old.items():
                 if run not in new:

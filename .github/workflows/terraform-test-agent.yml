@@ -444,5 +444,6 @@ jobs:
       - name: Fail the check when the agent's work did not verify
         if: needs.verify.result == 'success'
         run: |
+          if [ ! -f out/guard.json ]; then echo "::error::The verify job produced no results."; exit 1; fi
           if [ "$(jq -r .ok out/guard.json)" != "true" ]; then echo "::error::The agent's patch was rejected by the guard."; exit 1; fi
           if [ -f out/verify.json ] && [ "$(jq -r .ok out/verify.json)" != "true" ]; then echo "::error::Tests failed on re-run."; exit 1; fi
