@@ -64,12 +64,16 @@ jobs:
             "number=\(.number)",
             "head_sha=\(.head.sha)",
             "head_ref=\(.head.ref)",
-            "base_sha=\(.base.sha)",
             "same_repo=\(.head.repo.full_name == .base.repo.full_name)",
             "draft=\(.draft)",
             "state=\(.state)",
             "skip_label=\([.labels[].name] | index("test-agent:skip") != null)"
           ' pr.json >> "$GITHUB_OUTPUT"
+          # The trusted side is the current tip of the base branch. The PR's
+          # own base.sha is not refreshed when the base branch moves, so an
+          # older pull request would keep running an older agent configuration.
+          base_ref=$(jq -r .base.ref pr.json)
+          echo "base_sha=$(gh api "repos/$REPO/git/ref/heads/$base_ref" --jq .object.sha)" >> "$GITHUB_OUTPUT"
           gh api "repos/$REPO/commits/$(jq -r .head.sha pr.json)" --jq .commit.message > head-message.txt
 
       - name: Decide whether the agent runs
