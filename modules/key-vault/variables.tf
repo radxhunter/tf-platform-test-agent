@@ -18,6 +18,11 @@ variable "tenant_id" {
   type        = string
 }
 
+variable "log_analytics_workspace_id" {
+  description = "Workspace that receives the vault's audit logs and metrics."
+  type        = string
+}
+
 variable "secret_readers" {
   description = "Object IDs of identities that may read secrets, by a short key."
   type        = map(string)

@@ -21,6 +21,7 @@ module "log_analytics" {
   name                = "log-${local.prefix}"
   resource_group_name = azurerm_resource_group.this.name
   location            = var.location
+  retention_in_days   = var.log_retention_days
   tags                = local.tags
 }
 
@@ -40,11 +41,12 @@ module "data_lake" {
 module "key_vault" {
   source = "../../modules/key-vault"
 
-  name                = "kv-${local.prefix}"
-  resource_group_name = azurerm_resource_group.this.name
-  location            = var.location
-  tenant_id           = var.tenant_id
-  allowed_subnet_ids  = [module.network.subnet_ids["apps"]]
+  name                       = "kv-${local.prefix}"
+  resource_group_name        = azurerm_resource_group.this.name
+  location                   = var.location
+  tenant_id                  = var.tenant_id
+  allowed_subnet_ids         = [module.network.subnet_ids["apps"]]
+  log_analytics_workspace_id = module.log_analytics.id
   secret_readers = {
     data_factory = module.data_factory.principal_id
     function_app = module.function_app.principal_id
