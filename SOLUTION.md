@@ -22,7 +22,7 @@ pull_request ──► context ──► checks ──► agent ──► verify
 | `.claude/skills/tf-coverage/` | `coverage.py`: which resources, validations and outputs tests reference. |
 | `.claude/skills/tf-risk-review/` | Checklist and evidence rules for findings. |
 | `.github/workflows/terraform-test-agent.yml` | The workflow. |
-| `.github/test-agent/` | Trusted workflow scripts: run the agent, sanitise the workspace, guard the patch, render the comment, output schema. |
+| `.github/test-agent/` | Trusted workflow scripts: run the agent, sanitise the workspace, validate its output against the schema, guard the patch, render the comment. |
 
 The skills are ordinary Claude Code skills. The same files serve a developer
 running Claude Code locally (`/tf-test-authoring`, or asking for the
@@ -74,6 +74,47 @@ cannot drift apart.
 | **Commit to the PR branch with `GITHUB_TOKEN`.** | Simple, and it cannot trigger itself in a loop: pushes made with `GITHUB_TOKEN` start no workflow. | The new commit gets no new workflow run. The status set by `publish` covers it. A GitHub App token would give a full re-run (see production). |
 | **Plan-first tests with mocks.** `apply` with mocks only for outputs. | Fast (seconds per module), no credentials, deterministic. | Cannot prove Azure accepts the configuration. |
 
+## How the LLM is controlled, and what that caught
+
+| Control | Enforced by |
+|---|---|
+| What the agent may touch | `--tools`, `--allowedTools` and `dontAsk` in `run_agent.sh`, then `guard_changes.py` on the patch |
+| What a test may do | `lint_tests.py` (policy P1-P6), and the sandbox in `run_tests.py` |
+| Whether tests pass | `verify` re-runs them; the agent's claim is not used |
+| The shape of the result | `validate_output.py` against `output.schema.json` |
+| Whether a secret leaked | Exact-value and pattern search on everything the agent produced |
+| Spend and time | `--max-budget-usd`, job `timeout-minutes`, three fix rounds per file |
+
+Building it surfaced four problems. Each was caught by running something,
+not by reading the model's output, and none of them let unverified work
+into a pull request:
+
+1. **Mock patterns that looked right but failed.** Before writing
+   `reference.md` I ran every pattern. Two were wrong: a nested `identity`
+   block in `mock_resource` is an object, not a list, and a stack test cannot
+   address resources inside a module. A third problem only showed under
+   `apply`: mocked IDs are random strings that dependent resources reject. The
+   skill now teaches the fixes, not the guesses.
+2. **`--json-schema` was silently ignored together with `--agent`.** The
+   first CI run wrote good tests, but returned JSON in its own shape. The
+   workflow refused to publish it ([run](https://github.com/radxhunter/tf-platform-test-agent/actions/runs/39249355973)).
+   Fix: the schema is in the prompt, and the result is validated by our own
+   code ([#3](https://github.com/radxhunter/tf-platform-test-agent/pull/3)).
+3. **The trusted side was stale.** A pull request's `base.sha` is not
+   refreshed when `main` moves, so the second run used the agent configuration
+   from before the fix. The workflow now takes the current tip of the base
+   branch ([#4](https://github.com/radxhunter/tf-platform-test-agent/pull/4)).
+4. **A bug in my own guard.** The first run on the example pull request was
+   the first to *modify* an existing test file, and the guard crashed while
+   comparing its assertions (a relative `GIT_INDEX_FILE`). The pipeline failed
+   safe: nothing was committed and the check went red. The comment did not
+   say why, which was fixed along with the bug
+   ([#6](https://github.com/radxhunter/tf-platform-test-agent/pull/6)).
+
+The agent also tried, unprompted, to read several files with
+`cd modules && for ... cat ...` in Bash. `dontAsk` denied it, the denial is
+in the transcript, and the agent switched to the Read tool.
+
 ## Prerequisites and how to run it
 
 - A GitHub repository with Actions enabled. The workflow file is on the
@@ -106,7 +147,62 @@ python3 .claude/skills/tf-coverage/scripts/coverage.py modules/* --format markdo
 
 ## Example run
 
-_Filled in after the example pull request has run; see below._
+Pull request [#5](https://github.com/radxhunter/tf-platform-test-agent/pull/5)
+sends Key Vault audit logs to Log Analytics, validates log retention
+(30-730 days) and makes retention configurable per environment (prod 90). It
+breaks the existing key-vault tests on purpose, with a new required input.
+The [run](https://github.com/radxhunter/tf-platform-test-agent/actions/runs/39251842145)
+went like this:
+
+1. **checks** failed, correctly. With the pull request as pushed, key-vault
+   tests error with "No value for required variable". That result goes to the
+   agent as `baseline.json`.
+2. **agent** (24 turns, $0.12, no tool denied) loaded `tf-change-analysis`
+   and read the scope, diff and baseline. It then loaded `tf-test-authoring`,
+   `tf-coverage` and `tf-risk-review`, read `reference.md`, the changed code
+   and the existing tests, made three edits, and ran `tf-test-runner` once on
+   all three units. Its decisions:
+
+   | Unit | Decision | Reason given |
+   |---|---|---|
+   | `modules/key-vault` | updated tests | The new required input broke the baseline. Added it to the file-level variables, changed no assertion, and added a run for the new diagnostic setting (workspace wiring, `audit` group, `AllMetrics`). |
+   | `modules/log-analytics-workspace` | added tests | The new validation had no test. Added accepted boundaries 30 and 730, and rejected values 29 and 731 with `expect_failures`. |
+   | `stacks/data-platform` | no change | The new wiring is a module *input*, which a stack test cannot see. Existing tests still pass in dev and prod. |
+
+3. **verify**: the guard found three test files in scope, no removed
+   assertions. The re-run passed: key-vault 3/3, log-analytics 6/6, stack 5/5
+   in dev and 5/5 in prod.
+4. **publish** committed the tests as `04a8487`, set `tf-test-agent/verify`
+   to success on it, and posted the
+   [comment](https://github.com/radxhunter/tf-platform-test-agent/pull/5#issuecomment-6267096267).
+   It has two low/info findings on the change itself. One: the stack's
+   `log_retention_days` has no validation of its own, so a bad value fails
+   with an error naming the module's variable. The other: dev keeps the
+   30-day default while audit logs now flow to the workspace.
+
+The run is red overall because `checks` is red. That is intended: the
+commit as pushed was broken, and the agent's follow-up commit carries its own
+green status.
+
+The backfill run on [#2](https://github.com/radxhunter/tf-platform-test-agent/pull/2)
+added 24 test runs to the six units that had none, and found every planted
+risk without being told to look for them:
+
+- FTP allowed on the function app,
+- *Storage Blob Data Owner* where a narrower role fits,
+- a shell script run during plan,
+- private endpoints without DNS zones,
+- public access on by default in three modules,
+- unvalidated retention.
+
+It left those values unasserted on purpose and reported them, so the tests
+do not endorse them.
+
+Two runs of the same change are not identical. The first, failed attempt on
+#5 also added a stack test that checked the retention range; the second
+judged that the wiring is not observable from the stack and added none. Both
+are defensible, and both passed the same guard and re-run. That variance is
+why those controls exist.
 
 ## What the generated tests can and cannot show
 
