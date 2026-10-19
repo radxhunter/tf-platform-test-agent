@@ -1,0 +1,79 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "units", "test_changes", "findings", "limitations"],
+  "properties": {
+    "summary": { "type": "string", "maxLength": 800 },
+    "units": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "decision", "reason", "skills_used"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^(modules|stacks)/[a-z0-9][a-z0-9-]*$" },
+          "decision": { "enum": ["added_tests", "updated_tests", "no_change", "skipped"] },
+          "reason": { "type": "string", "maxLength": 600 },
+          "skills_used": {
+            "type": "array",
+            "items": { "enum": ["tf-change-analysis", "tf-test-authoring", "tf-test-runner", "tf-coverage", "tf-risk-review"] }
+          }
+        }
+      }
+    },
+    "test_changes": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "change", "runs", "rationale"],
+        "properties": {
+          "file": { "type": "string", "pattern": "^(modules|stacks)/[a-z0-9][a-z0-9-]*/tests/[a-z0-9_-]+\\.tftest\\.hcl$" },
+          "change": { "enum": ["added", "modified"] },
+          "runs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "change", "checks"],
+              "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "change": { "enum": ["added", "modified"] },
+                "checks": { "type": "string", "maxLength": 300 },
+                "previous": { "type": "string", "maxLength": 300 }
+              }
+            }
+          },
+          "rationale": { "type": "string", "maxLength": 600 }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 25,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "category", "file", "line", "title", "detail", "evidence", "in_diff"],
+        "properties": {
+          "severity": { "enum": ["high", "medium", "low", "info"] },
+          "category": { "enum": ["security", "reliability", "correctness", "maintainability", "test-gap"] },
+          "file": { "type": "string", "maxLength": 200 },
+          "line": { "type": "integer", "minimum": 0 },
+          "title": { "type": "string", "maxLength": 120 },
+          "detail": { "type": "string", "maxLength": 800 },
+          "evidence": { "type": "string", "maxLength": 400 },
+          "suggestion": { "type": "string", "maxLength": 400 },
+          "in_diff": { "type": "boolean" }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": { "type": "string", "maxLength": 300 }
+    }
+  }
+}

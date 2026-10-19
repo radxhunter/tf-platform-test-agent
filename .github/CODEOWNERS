@@ -1,0 +1,4 @@
+# The agent's instructions, tools and the workflow that runs it decide what an
+# LLM with an API key may do. Changes to them need an owner's review.
+/.claude/   @radxhunter
+/.github/   @radxhunter
