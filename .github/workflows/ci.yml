@@ -1,0 +1,94 @@
+name: CI
+
+# Checks that need no LLM and no secrets:
+#  - tooling: the scripts and workflows that police the agent are tested too
+#  - terraform: every unit is initialised and tested on main and every night,
+#    so a broken main is noticed even when no pull request touched it
+
+on:
+  pull_request:
+    paths: [".claude/**", ".github/**", "tests/**"]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IMAGE: hashicorp/terraform:1.16.6@sha256:bfffc1ded5fbf0a17beaaf22eb4793980abdb19d0761ff6a3a0efb2ab4d9b316
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+jobs:
+  tooling:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint the workflows
+        run: docker run --rm --network none -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color
+
+      - name: Syntax of scripts
+        run: |
+          python3 -m py_compile .claude/skills/*/scripts/*.py .github/test-agent/*.py
+          bash -n .github/test-agent/run_agent.sh
+          bash -n .github/test-agent/sanitize_workspace.sh
+
+      - name: Unit tests of the tooling
+        working-directory: tests/tooling
+        run: python3 -m unittest discover -s . -p 'test_*.py' -v
+
+  terraform:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every unit
+        id: units
+        run: |
+          units=$(ls -d modules/*/ stacks/*/ | sed 's|/$||' | tr '\n' ' ')
+          echo "units=$units" >> "$GITHUB_OUTPUT"
+
+      - name: Initialise (network, locked providers only)
+        env:
+          UNITS: ${{ steps.units.outputs.units }}
+        run: python3 .claude/skills/tf-test-runner/scripts/prepare.py $UNITS
+
+      - name: Lint, fmt, validate and test (sandbox)
+        env:
+          UNITS: ${{ steps.units.outputs.units }}
+        run: |
+          set +e
+          python3 .claude/skills/tf-test-runner/scripts/run_tests.py $UNITS --out run.json > /dev/null
+          status=$?
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r = json.load(open("run.json"))
+          print("| Unit | Result | Tests |\n|---|:-:|---|")
+          for u in r["units"]:
+              tests = "; ".join(f"{t['status']} ({(t.get('summary') or {}).get('passed', 0)} passed)" for t in u["tests"])
+              print(f"| `{u['unit']}` | {'✅' if u['ok'] else '❌'} | {tests} |")
+          EOF
+          python3 .claude/skills/tf-coverage/scripts/coverage.py $UNITS --format markdown >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Formatting of the whole repository (sandbox)
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" \
+            -v "$PWD:/ws:ro" -w /ws "$TF_IMAGE" fmt -check -recursive -no-color
