@@ -37,9 +37,16 @@ Each test protects a property a reviewer would care about if it broke:
    the rule has a boundary.
 3. **Shape**: `for_each` and `count` produce one item per input key, and
    optional blocks (`dynamic`) appear only when their input is set.
-4. **Wiring**: inputs reach the attribute they are meant for, and outputs
-   expose the right attribute. With mocks, check outputs in an `apply` run,
-   since computed values are unknown during plan.
+4. **Wiring and outputs**: inputs reach the attribute they are meant for, and
+   every `output` exposes the attribute it claims to. Outputs are the
+   module's public contract: callers (the stack, other modules) read them, so
+   an output that silently points at the wrong attribute breaks them. With
+   mocks, check outputs in an `apply` run, since computed values are unknown
+   during plan. Assert equality with the source attribute
+   (`output.id == azurerm_x.this.id`), not just `!= null`. If the provider
+   validates an ID the output feeds into, give the resource a well-formed
+   `id` in `mock_resource` (see `reference.md`). Put the output checks in one
+   `apply` run per file so they cost one run, not one per output.
 5. **Conventions** from the README: naming prefixes, tags applied.
 
 Avoid tests that only restate the code (`name == var.name` everywhere) or that
