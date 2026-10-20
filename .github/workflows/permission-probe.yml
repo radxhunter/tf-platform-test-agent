@@ -46,7 +46,12 @@ jobs:
         run: |
           mkdir -p .test-agent/context
           echo '{"units": []}' > .test-agent/context/scope.json
-          bash .github/test-agent/run_agent.sh agent-out || true
+          # Run 1 showed that the agent persona refuses these steps on its
+          # own. To test the tool permissions themselves, use a copy of the
+          # launcher that differs by one removed line: --agent.
+          sed '/--agent terraform-test-engineer/d' .github/test-agent/run_agent.sh > .github/test-agent/run_probe.sh
+          diff .github/test-agent/run_agent.sh .github/test-agent/run_probe.sh || true
+          bash .github/test-agent/run_probe.sh agent-out || true
 
       - name: What the permissions did
         run: |
