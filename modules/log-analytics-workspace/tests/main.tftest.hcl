@@ -66,6 +66,15 @@ run "rejects_retention_above_maximum" {
   expect_failures = [var.retention_in_days]
 }
 
+run "output_exposes_workspace_id" {
+  command = apply
+
+  assert {
+    condition     = output.id == azurerm_log_analytics_workspace.this.id
+    error_message = "Output id must be the workspace's ID."
+  }
+}
+
 run "retention_follows_input" {
   command = plan
 

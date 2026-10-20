@@ -1,4 +1,22 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_resource "azurerm_virtual_network" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-tp-test"
+    }
+  }
+
+  mock_resource "azurerm_subnet" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-tp-test/subnets/snet-test"
+    }
+  }
+
+  mock_resource "azurerm_network_security_group" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Network/networkSecurityGroups/nsg-test"
+    }
+  }
+}
 
 variables {
   name                = "tp-test"
@@ -46,6 +64,25 @@ run "names_follow_the_convention" {
   assert {
     condition     = azurerm_subnet.this["apps"].name == "snet-apps"
     error_message = "Subnet names must start with snet-."
+  }
+}
+
+run "outputs_expose_vnet_and_subnet_ids" {
+  command = apply
+
+  assert {
+    condition     = output.vnet_id == azurerm_virtual_network.this.id
+    error_message = "Output vnet_id must be the virtual network's ID."
+  }
+
+  assert {
+    condition     = toset(keys(output.subnet_ids)) == toset(["apps", "data"])
+    error_message = "Output subnet_ids must have one entry for each subnet key."
+  }
+
+  assert {
+    condition     = alltrue([for key, id in output.subnet_ids : id == azurerm_subnet.this[key].id])
+    error_message = "Each subnet_ids entry must be the ID of the subnet with the same key."
   }
 }
 

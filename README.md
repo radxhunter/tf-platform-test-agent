@@ -38,6 +38,23 @@ terraform validate
 
 The stack has no backend configured. A real deployment would need one, and credentials for it.
 
+## Test agent
+
+Pull requests that change `modules/` or `stacks/` are picked up by the
+Terraform test agent (`.github/workflows/terraform-test-agent.yml`). It adds
+or updates tests for the changed units, re-runs them in a sandbox, commits
+the ones that pass to the pull request, and leaves one comment with results
+and findings. See [SOLUTION.md](SOLUTION.md) for how it works and why.
+
+Add the `test-agent:skip` label to a pull request to skip the agent.
+
+The scripts and workflows that police the agent have their own tests
+(`tests/tooling`, run by the `CI` workflow). Run them with:
+
+```sh
+cd tests/tooling && python3 -m unittest discover -s . -p 'test_*.py'
+```
+
 ## Conventions
 
 - Resource files in a stack and modules use `main.tf`, `variables.tf`, `outputs.tf` and `versions.tf`.

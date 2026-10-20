@@ -1,4 +1,11 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_resource "azurerm_private_endpoint" {
+    defaults = {
+      id                         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Network/privateEndpoints/pe-tp-test-blob"
+      private_service_connection = { private_ip_address = "10.10.1.4" }
+    }
+  }
+}
 
 variables {
   name                = "tp-test-blob"
@@ -25,6 +32,20 @@ run "endpoint_is_automatic_and_named_by_convention" {
   assert {
     condition     = azurerm_private_endpoint.this.private_service_connection[0].subresource_names == tolist(["blob"])
     error_message = "The subresource name must reach the service connection."
+  }
+}
+
+run "outputs_expose_endpoint_id_and_private_ip" {
+  command = apply
+
+  assert {
+    condition     = output.id == azurerm_private_endpoint.this.id
+    error_message = "Output id must be the endpoint's ID."
+  }
+
+  assert {
+    condition     = output.private_ip_address == "10.10.1.4"
+    error_message = "Output private_ip_address must come from the service connection."
   }
 }
 

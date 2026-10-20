@@ -1,4 +1,11 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_resource "azurerm_databricks_workspace" {
+    defaults = {
+      id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Databricks/workspaces/dbw-tp-test"
+      workspace_url = "adb-1234567890123456.7.azuredatabricks.net"
+    }
+  }
+}
 
 variables {
   name                = "dbw-tp-test"
@@ -34,6 +41,20 @@ run "managed_resource_group_name_is_derived" {
   assert {
     condition     = azurerm_databricks_workspace.this.managed_resource_group_name == "rg-test-dbw-tp-test-managed"
     error_message = "The managed resource group must be <resource group>-<name>-managed."
+  }
+}
+
+run "outputs_expose_workspace_id_and_url" {
+  command = apply
+
+  assert {
+    condition     = output.id == azurerm_databricks_workspace.this.id
+    error_message = "Output id must be the workspace's ID."
+  }
+
+  assert {
+    condition     = output.workspace_url == "adb-1234567890123456.7.azuredatabricks.net"
+    error_message = "Output workspace_url must be the workspace's URL."
   }
 }
 
