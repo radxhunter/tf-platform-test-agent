@@ -16,9 +16,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 schema="$(cat "$here/output.schema.json")"
 scope_units="$(python3 -c 'import json; print(" ".join(u["path"] for u in json.load(open(".test-agent/context/scope.json"))["units"]))')"
 
-# The schema is also in the prompt: --json-schema alone did not produce
-# structured output together with --agent, and the result is validated
-# below either way.
+# --json-schema is not used: together with --agent it did not produce
+# structured output (see SOLUTION.md). The schema is part of the prompt and
+# the result is validated against it below.
 prompt="Pull request #${PR_NUMBER}. Units in scope: ${scope_units:-none}.
 The context files are in .test-agent/context/ (scope.json, diff.patch, baseline.json).
 Follow your instructions: plan per unit, review, write or update tests, run them.
@@ -51,7 +51,6 @@ claude -p "$prompt" \
   --allowedTools "${allowed[@]}" \
   --disallowedTools "${denied[@]}" \
   --setting-sources project \
-  --json-schema "$schema" \
   --max-budget-usd "${TEST_AGENT_MAX_USD:-5}" \
   --no-session-persistence \
   --output-format stream-json --verbose \
