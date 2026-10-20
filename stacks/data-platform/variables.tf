@@ -41,3 +41,9 @@ variable "public_access_enabled" {
   type        = bool
   default     = false
 }
+
+variable "log_retention_days" {
+  description = "How long the platform's logs are kept, in days."
+  type        = number
+  default     = 30
+}

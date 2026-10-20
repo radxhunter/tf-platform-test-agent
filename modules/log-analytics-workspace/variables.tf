@@ -14,9 +14,14 @@ variable "location" {
 }
 
 variable "retention_in_days" {
-  description = "How long logs are kept."
+  description = "How long logs are kept, in days. Azure accepts 30 to 730."
   type        = number
   default     = 30
+
+  validation {
+    condition     = var.retention_in_days >= 30 && var.retention_in_days <= 730
+    error_message = "The retention must be between 30 and 730 days."
+  }
 }
 
 variable "tags" {

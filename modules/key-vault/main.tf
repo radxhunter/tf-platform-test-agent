@@ -30,3 +30,17 @@ resource "azurerm_role_assignment" "secret_reader" {
   role_definition_id = data.azurerm_role_definition.secrets_user.id
   principal_id       = each.value
 }
+
+resource "azurerm_monitor_diagnostic_setting" "this" {
+  name                       = "diag-${var.name}"
+  target_resource_id         = azurerm_key_vault.this.id
+  log_analytics_workspace_id = var.log_analytics_workspace_id
+
+  enabled_log {
+    category_group = "audit"
+  }
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
+}
