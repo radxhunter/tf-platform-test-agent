@@ -231,8 +231,12 @@ pass and still be weak, which is why its commit is reviewed.
 - Claude Code is installed with `npm` at a pinned version, without a
   checksum.
 - After the agent pushes, there is a commit and a status but no full re-run.
-- `main` requires a pull request and the `tooling` check; as the only owner, I
-  can bypass it. In a team nobody should.
+- `main` is protected by a ruleset: changes go through a pull request, no
+  force pushes, no deletion. It does not require the `tooling` check, because
+  that check is path-filtered and would never report on a pull request that
+  only touches `modules/`. I am the only owner and can bypass the ruleset. In
+  a team, require the checks (run `tooling` on every pull request) and reviews,
+  and let nobody bypass.
 
 ## With many more modules, teams or repositories
 
