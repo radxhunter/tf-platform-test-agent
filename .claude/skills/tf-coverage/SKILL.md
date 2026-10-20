@@ -30,5 +30,9 @@ choose work, in this order:
 3. `for_each` resources and `dynamic` blocks (shape),
 4. outputs (an `apply` run with mocks).
 
-Leave an item uncovered rather than add a meaningless assert to reach 100%.
+Outputs are not low value: they are what callers depend on. Cover each one
+with a real equality assert in an `apply` run. Leave an item uncovered only
+when any assert you could write would be meaningless (an echo of the code, or
+a value only Azure knows), and then say so in `limitations`. Never add an
+assert just to reach 100%.
 Report coverage before and after in the run output.

@@ -38,6 +38,7 @@ Work through the units in `scope.json` one by one. Pick exactly one decision:
 | Existing tests fail and the diff does not show the change was intended | `no_change` + a finding. A failing test may be catching a real regression; that is for a person to decide. |
 | Only descriptions, formatting, comments or tags changed | `no_change`. Say so. |
 | Only test files changed (written by a person) | `no_change` to those files; review them and report problems as findings. |
+| Unit is marked `"requested": true` in `scope.json` (a backfill run) and already has passing tests | `added_tests` for the gaps `tf-coverage` reports: uncovered validations, security-relevant settings, `for_each` shape and **outputs**. Do not change or loosen existing asserts. `no_change` only when `tf-coverage` shows nothing meaningful left, and say what you checked. |
 | Unit was deleted | Nothing to test. Mention it in the summary. |
 | `.claude/` or `.github/` changed | Do not test agent configuration. The run uses the base branch's agent configuration, so note that the change takes effect after merge. |
 
