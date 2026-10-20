@@ -1,4 +1,17 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_resource "azurerm_key_vault" {
+    defaults = {
+      id        = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.KeyVault/vaults/kv-tp-test"
+      vault_uri = "https://kv-tp-test.vault.azure.net/"
+    }
+  }
+
+  mock_data "azurerm_role_definition" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6"
+    }
+  }
+}
 
 variables {
   name                = "kv-tp-test"
@@ -21,6 +34,20 @@ run "vault_uses_rbac_and_purge_protection" {
   assert {
     condition     = azurerm_key_vault.this.purge_protection_enabled == true
     error_message = "Purge protection must be on."
+  }
+}
+
+run "outputs_expose_vault_id_and_uri" {
+  command = apply
+
+  assert {
+    condition     = output.id == azurerm_key_vault.this.id
+    error_message = "Output id must be the vault's ID."
+  }
+
+  assert {
+    condition     = output.vault_uri == "https://kv-tp-test.vault.azure.net/"
+    error_message = "Output vault_uri must be the vault's URI."
   }
 }
 

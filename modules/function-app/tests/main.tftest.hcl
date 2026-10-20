@@ -1,4 +1,17 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_resource "azurerm_service_plan" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Web/serverFarms/asp-func-tp-test"
+    }
+  }
+
+  mock_resource "azurerm_linux_function_app" {
+    defaults = {
+      id       = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Web/sites/func-tp-test"
+      identity = { principal_id = "33333333-3333-3333-3333-333333333333" }
+    }
+  }
+}
 mock_provider "external" {}
 
 override_data {
@@ -67,6 +80,20 @@ run "runtime_storage_role_is_scoped_to_the_storage_account" {
   assert {
     condition     = azurerm_role_assignment.runtime_storage.scope == var.storage_account_id
     error_message = "The role assignment must be scoped to the runtime storage account only."
+  }
+}
+
+run "outputs_expose_app_id_and_identity" {
+  command = apply
+
+  assert {
+    condition     = output.id == azurerm_linux_function_app.this.id
+    error_message = "Output id must be the function app's ID."
+  }
+
+  assert {
+    condition     = output.principal_id == "33333333-3333-3333-3333-333333333333"
+    error_message = "Output principal_id must be the app's managed identity principal."
   }
 }
 
