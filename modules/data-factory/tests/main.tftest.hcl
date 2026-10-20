@@ -1,4 +1,11 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_resource "azurerm_data_factory" {
+    defaults = {
+      id       = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.DataFactory/factories/adf-tp-test"
+      identity = { principal_id = "22222222-2222-2222-2222-222222222222" }
+    }
+  }
+}
 
 variables {
   name                       = "adf-tp-test"
@@ -49,6 +56,20 @@ run "creates_one_linked_service_per_account" {
   assert {
     condition     = azurerm_data_factory_linked_service_data_lake_storage_gen2.this["raw"].name == "ls-raw"
     error_message = "Linked services must be named ls-<key>."
+  }
+}
+
+run "outputs_expose_factory_id_and_identity" {
+  command = apply
+
+  assert {
+    condition     = output.id == azurerm_data_factory.this.id
+    error_message = "Output id must be the factory's ID."
+  }
+
+  assert {
+    condition     = output.principal_id == "22222222-2222-2222-2222-222222222222"
+    error_message = "Output principal_id must be the factory's managed identity principal."
   }
 }
 

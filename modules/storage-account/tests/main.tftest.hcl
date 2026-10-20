@@ -1,4 +1,11 @@
-mock_provider "azurerm" {}
+mock_provider "azurerm" {
+  mock_resource "azurerm_storage_account" {
+    defaults = {
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/sttptest001"
+      primary_dfs_endpoint = "https://sttptest001.dfs.core.windows.net/"
+    }
+  }
+}
 
 variables {
   name                = "sttptest001"
@@ -32,6 +39,25 @@ run "creates_one_container_per_name" {
   assert {
     condition     = length(azurerm_storage_container.this) == 2
     error_message = "Expected one container for each name."
+  }
+}
+
+run "outputs_expose_account_id_name_and_dfs_endpoint" {
+  command = apply
+
+  assert {
+    condition     = output.id == azurerm_storage_account.this.id
+    error_message = "Output id must be the storage account's ID."
+  }
+
+  assert {
+    condition     = output.name == azurerm_storage_account.this.name
+    error_message = "Output name must be the storage account's name."
+  }
+
+  assert {
+    condition     = output.primary_dfs_endpoint == "https://sttptest001.dfs.core.windows.net/"
+    error_message = "Output primary_dfs_endpoint must be the account's DFS endpoint."
   }
 }
 
