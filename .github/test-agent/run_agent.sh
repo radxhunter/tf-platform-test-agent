@@ -27,6 +27,12 @@ around it, that is valid against this JSON Schema (every required field,
 including units[].skills_used):
 ${schema}"
 
+# Only a workflow can set this. It lets a probe run the exact same tool
+# permissions with a different prompt, to show what the permissions deny.
+if [ -n "${TEST_AGENT_PROMPT:-}" ]; then
+  prompt="$TEST_AGENT_PROMPT"
+fi
+
 runner='python3 .claude/skills/tf-test-runner/scripts/run_tests.py'
 coverage='python3 .claude/skills/tf-coverage/scripts/coverage.py'
 
