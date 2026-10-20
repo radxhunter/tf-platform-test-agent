@@ -142,7 +142,9 @@ jobs:
         working-directory: work
         env:
           UNITS: ${{ steps.scope.outputs.units }}
-        run: python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py $UNITS
+        run: |
+          read -ra units <<< "$UNITS"
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py "${units[@]}"
 
       - name: Run existing tests (sandbox)
         id: baseline
@@ -151,19 +153,18 @@ jobs:
         env:
           UNITS: ${{ steps.scope.outputs.units }}
         run: |
-          set +e
-          python3 ../trusted/.claude/skills/tf-test-runner/scripts/run_tests.py $UNITS --out ../out/baseline.json > /dev/null
-          echo "ok=$([ $? -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          python3 ../trusted/.claude/skills/tf-coverage/scripts/coverage.py $UNITS > ../out/coverage-before.json
+          read -ra units <<< "$UNITS"
+          if python3 ../trusted/.claude/skills/tf-test-runner/scripts/run_tests.py "${units[@]}" --out ../out/baseline.json > /dev/null; then ok=true; else ok=false; fi
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          python3 ../trusted/.claude/skills/tf-coverage/scripts/coverage.py "${units[@]}" > ../out/coverage-before.json
 
       - name: Check formatting of the whole repository (sandbox)
         id: fmt
         working-directory: work
         run: |
-          set +e
-          docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" \
-            -v "$PWD:/ws:ro" -w /ws "$TF_IMAGE" fmt -check -recursive -no-color
-          echo "ok=$([ $? -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" \
+            -v "$PWD:/ws:ro" -w /ws "$TF_IMAGE" fmt -check -recursive -no-color; then ok=true; else ok=false; fi
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
       - name: Upload context
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -231,7 +232,8 @@ jobs:
         working-directory: work
         run: |
           docker pull --quiet "$TF_IMAGE"
-          python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py $units
+          read -ra unit_list <<< "$units"
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py "${unit_list[@]}"
 
       - name: Install Claude Code
         run: npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
@@ -327,9 +329,8 @@ jobs:
         id: guard
         run: |
           mkdir -p out
-          set +e
-          python3 trusted/.github/test-agent/guard_changes.py work in/tests.patch in/scope.json --out out/guard.json
-          echo "ok=$([ $? -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if python3 trusted/.github/test-agent/guard_changes.py work in/tests.patch in/scope.json --out out/guard.json; then ok=true; else ok=false; fi
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
       - name: Apply the patch and re-run every test in scope (sandbox)
         if: steps.guard.outputs.ok == 'true'
@@ -337,10 +338,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -s ../in/tests.patch ]; then git apply ../in/tests.patch; fi
-          units=$(jq -r '[.units[].path] | join(" ")' ../in/scope.json)
-          python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py $units
-          python3 ../trusted/.claude/skills/tf-test-runner/scripts/run_tests.py $units --out ../out/verify.json > /dev/null || true
-          python3 ../trusted/.claude/skills/tf-coverage/scripts/coverage.py $units > ../out/coverage-after.json
+          mapfile -t units < <(jq -r '.units[].path' ../in/scope.json)
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/prepare.py "${units[@]}"
+          python3 ../trusted/.claude/skills/tf-test-runner/scripts/run_tests.py "${units[@]}" --out ../out/verify.json > /dev/null || true
+          python3 ../trusted/.claude/skills/tf-coverage/scripts/coverage.py "${units[@]}" > ../out/coverage-after.json
           jq '{ok, units: [.units[] | {unit, ok}]}' ../out/verify.json
 
       - name: Upload verification

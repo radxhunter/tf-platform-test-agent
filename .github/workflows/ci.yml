@@ -62,21 +62,23 @@ jobs:
       - name: Every unit
         id: units
         run: |
-          units=$(ls -d modules/*/ stacks/*/ | sed 's|/$||' | tr '\n' ' ')
+          units=$(find modules stacks -mindepth 1 -maxdepth 1 -type d | sort | tr '\n' ' ')
           echo "units=$units" >> "$GITHUB_OUTPUT"
 
       - name: Initialise (network, locked providers only)
         env:
           UNITS: ${{ steps.units.outputs.units }}
-        run: python3 .claude/skills/tf-test-runner/scripts/prepare.py $UNITS
+        run: |
+          read -ra units <<< "$UNITS"
+          python3 .claude/skills/tf-test-runner/scripts/prepare.py "${units[@]}"
 
       - name: Lint, fmt, validate and test (sandbox)
         env:
           UNITS: ${{ steps.units.outputs.units }}
         run: |
-          set +e
-          python3 .claude/skills/tf-test-runner/scripts/run_tests.py $UNITS --out run.json > /dev/null
-          status=$?
+          read -ra units <<< "$UNITS"
+          status=0
+          python3 .claude/skills/tf-test-runner/scripts/run_tests.py "${units[@]}" --out run.json > /dev/null || status=$?
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import json
           r = json.load(open("run.json"))
@@ -85,7 +87,7 @@ jobs:
               tests = "; ".join(f"{t['status']} ({(t.get('summary') or {}).get('passed', 0)} passed)" for t in u["tests"])
               print(f"| `{u['unit']}` | {'✅' if u['ok'] else '❌'} | {tests} |")
           EOF
-          python3 .claude/skills/tf-coverage/scripts/coverage.py $UNITS --format markdown >> "$GITHUB_STEP_SUMMARY"
+          python3 .claude/skills/tf-coverage/scripts/coverage.py "${units[@]}" --format markdown >> "$GITHUB_STEP_SUMMARY"
           exit $status
 
       - name: Formatting of the whole repository (sandbox)
